@@ -29,7 +29,7 @@ contract SimpleMultiSig {
     uint256 public required;    // 执行所需最小确认数
 
     Txn[] public txs; // 所有待执行/已执行交易
-    mapping(uint256 => mapping(address => bool)) public confirmeBy; // txId => owner => 是否确认过
+    mapping(uint256 => mapping(address => bool)) public confirmedBy; // txId => owner => 是否确认过
 
     // 权限 后续所有声明都加这个权限
     modifier onlyOwner() {
@@ -81,14 +81,26 @@ contract SimpleMultiSig {
 
     /// @notice owner 对指定交易进行确认
     function confirmTx(uint256 txId) external onlyOwner {
+        
+        // 验证交易是否存在
         require(txId < txs.length, "bad txId");
+        
+        // 后续要操作状态变量需要使用storage
         Txn storage t = txs[txId];
         
+        // 验证交易是否已经执行
         require(!t.executed, "excuted");
+        // 验证确认数是否足够
         require(t.confirmations >= required, "not enough confirms");
-
-        t.executed = true;  // 先标记，防止重入
-        (bool ok, bytes memory ret) = t.to.call{value: t.value}(t.data);
-        require(ok, "call failed");
+        
+        // 验证确认数是否足够
+        confirmedBy[txId][msg.sender] = true;
+        t.confirmations += 1;
+        
+        // 日志
+        emit ConfirmTx(msg.sender, txId);
     }
+
+    /// @notice 到达门限后执行交易,符合最小人数要求之后可以执行
+    
 }
