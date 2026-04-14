@@ -1,0 +1,55 @@
+/// <reference types="@nomicfoundation/hardhat-viem" />
+import { network } from "hardhat";
+
+async function main() {
+  const { viem } = await network.connect();
+  const [owner1, owner2, owner3, beneficiary] = await viem.getWalletClients();
+
+  // 1) 部署多签（3-owners，2 确认）
+  const multiSig = await viem.deployContract("SimpleMultiSig", [
+    [owner1.account.address, owner2.account.address, owner3.account.address],
+    2n,
+  ]);
+
+  // 2) 部署时间锁（admin=多签，最小延迟 1 小时）
+  const minDelay = 3600n;
+  const timeLock = await viem.deployContract("SimpleTimeLock", [multiSig.address, minDelay]);
+
+  // 3) 部署示例代币并准备锁仓参数
+  const totalAmount = 1_000_000n * 10n ** 18n;
+  const token = await viem.deployContract("MyToken", ["Demo Token", "DMT", totalAmount]);
+
+  const latestBlock = await viem.getPublicClient().getBlock();
+  const start = BigInt(latestBlock.timestamp) + 120n; // 2 分钟后开始
+  const duration = daysToSeconds(180n);
+
+  // 4) 部署线性锁仓金库（管理权交给时间锁）
+  const vestingVault = await viem.deployContract("LinearVestingVault", [
+    token.address,
+    beneficiary.account.address,
+    start,
+    duration,
+    totalAmount,
+    timeLock.address,
+  ]);
+
+  // 5) 把锁仓总额转入金库
+  await token.write.transfer([vestingVault.address, totalAmount]);
+
+  console.log("SimpleMultiSig:", multiSig.address);
+  console.log("SimpleTimeLock:", timeLock.address);
+  console.log("MyToken:", token.address);
+  console.log("LinearVestingVault:", vestingVault.address);
+  console.log("beneficiary:", beneficiary.account.address);
+  console.log("start:", start.toString());
+  console.log("duration(seconds):", duration.toString());
+}
+
+function daysToSeconds(days: bigint = 1n): bigint {
+  return days * 24n * 60n * 60n;
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

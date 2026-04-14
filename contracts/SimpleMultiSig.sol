@@ -1,50 +1,45 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @notice 最新 ERC20 接口
+/// @notice 最小 ERC20 接口（本示例仅使用 transfer / balanceOf）
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
 }
 
-/// @notice 多签合约: N-of-M 确认后执行调用
+/// @notice 最小多签：M 个 owner 至少 N 个确认后执行交易
 contract SimpleMultiSig {
-    // 提交交易（仅等级，不会立即执行）
+    // 仅登记交易，不会立即执行
     event SubmitTx(uint256 indexed txId, address indexed to, uint256 value, bytes data);
-    // owner 对交易确认
+    // owner 完成一次确认
     event ConfirmTx(address indexed owner, uint256 indexed txId);
-    // 交易执行成功
+    // 达到门限后执行成功
     event ExecuteTx(uint256 indexed txId, bytes result);
 
     struct Txn {
-        address to; // 目标地址
-        uint256 value; // 附带Wei
-        bytes data; // 调用数据
-        bool executed; // 是否执行
-        uint256 confirmations; // 当前确认
+        address to;             // 目标地址（合约或 EOA）
+        uint256 value;          // 附带 ETH（wei）
+        bytes data;             // 调用数据（函数选择器+参数）
+        bool executed;          // 是否已执行
+        uint256 confirmations;  // 已确认数量
     }
 
-    address[] public owners;    // owner 列表
-    mapping(address => bool) public isOwner;    // 地址是否为 owner
-    uint256 public required;    // 执行所需最小确认数
+    address[] public owners; // owner 列表（M）
+    mapping(address => bool) public isOwner; // 快速判断地址是否 owner
+    uint256 public required; // 执行所需最小确认数（N）
 
     Txn[] public txs; // 所有待执行/已执行交易
     mapping(uint256 => mapping(address => bool)) public confirmedBy; // txId => owner => 是否确认过
 
-    // 权限 后续所有声明都加这个权限
     modifier onlyOwner() {
-        require(isOwner[msg.sender], "Not an owner");
+        require(isOwner[msg.sender], "not owner");
         _;
     }
 
-    /**
-    * @param _owners owner 地址列表 M
-    * @param _required 执行所需最小确认数（n)
-    */
     constructor(address[] memory _owners, uint256 _required) {
-        require(_owners.length > 0, "Owners are required");
+        require(_owners.length > 0, "owners empty");
         require(_required > 0 && _required <= _owners.length, "bad required");
-    
+
         for (uint256 i = 0; i < _owners.length; i++) {
             address o = _owners[i];
             require(o != address(0), "zero owner");
@@ -56,23 +51,18 @@ contract SimpleMultiSig {
         required = _required;
     }
 
-    /// @notice 提交一笔执行交易
-    function submitTx(address to, uint256 value, bytes calldata data) 
-        external 
-        onlyOwner 
-        returns (uint256 txId) 
-    {
-        // 验证是否是空地址
-        require(to != address(0), "invalid to");
-        
+    /// @notice 提交一笔待执行交易
+    function submitTx(address to, uint256 value, bytes calldata data) external onlyOwner returns (uint256 txId) {
+        require(to != address(0), "zero to");
+
         txId = txs.length;
         txs.push(
             Txn({
-                to:to,
-                value:value,
-                data:data,
-                executed:false,
-                confirmations:0
+                to: to,
+                value: value,
+                data: data,
+                executed: false,
+                confirmations: 0
             })
         );
 
@@ -81,35 +71,30 @@ contract SimpleMultiSig {
 
     /// @notice owner 对指定交易进行确认
     function confirmTx(uint256 txId) external onlyOwner {
-        
-        // 验证交易是否存在
         require(txId < txs.length, "bad txId");
-        
-        // 后续要操作状态变量需要使用storage
         Txn storage t = txs[txId];
-        
-        // 验证交易是否已经执行
-        require(!t.executed, "excuted");
-        // 验证确认数是否足够
-        require(t.confirmations >= required, "not enough confirms");
-        
-        // 验证确认数是否足够
+
+        require(!t.executed, "executed");
+        require(!confirmedBy[txId][msg.sender], "already confirmed");
+
         confirmedBy[txId][msg.sender] = true;
         t.confirmations += 1;
-        
-        // 日志
+
         emit ConfirmTx(msg.sender, txId);
     }
 
-    /// @notice 到达门限后执行交易,符合最小人数要求之后可以执行
-        function executeTx(uint256 txId) external onlyOwner returns (bytes memory result) {
+    /// @notice 达到门限后执行交易
+    function executeTx(uint256 txId) external onlyOwner returns (bytes memory result) {
         require(txId < txs.length, "bad txId");
         Txn storage t = txs[txId];
+
         require(!t.executed, "executed");
         require(t.confirmations >= required, "not enough confirms");
-        t.executed = true;
+
+        t.executed = true; // 先标记，防止重入执行
         (bool ok, bytes memory ret) = t.to.call{value: t.value}(t.data);
         require(ok, "call failed");
+
         emit ExecuteTx(txId, ret);
         return ret;
     }
@@ -118,9 +103,9 @@ contract SimpleMultiSig {
 }
 
 /**
- * @title SimpleTimelock
+ * @title SimpleTimeLock
  * @notice 最小时间锁：管理员先 queue，等待最小延迟后 execute
- * @dev 建议 admin 设置为多签合约地址，这样就是“多签 + 时间锁”组合
+ * @dev 建议 admin 设置为多签地址，即可组合成“多签+时间锁”
  */
 contract SimpleTimeLock {
     event Queue(bytes32 indexed opId, address indexed target, uint256 value, bytes data, uint256 eta);
@@ -138,121 +123,142 @@ contract SimpleTimeLock {
         _;
     }
 
-    // 传递进来参数 地址和最小时间
     constructor(address _admin, uint256 _minDelay) {
         require(_admin != address(0), "zero admin");
-        require(_minDelay > 0, "delay=0");        
+        require(_minDelay > 0, "delay=0");
         admin = _admin;
         minDelay = _minDelay;
     }
 
-    /// @notice 通过参数确定唯一操作ID 
-    // calldata 表示只读，只能读不能改
-    // memory data 会拷贝到内存可修改
-    // pure 表示只计算，这个函数不上状态
-    // keccak256 是一个哈希函数，它将输出的数据是固定的256位长度
-    // 实现原理是内部有一个 固定 1600位 200个字节 的状态数组，将给出的字符补充为 1088位，数据库，异或进入水箱进行异或运算，超过的会形成多个数据块
-    // abi.encode 以太坊 abi 标准，将参数转换为 evm可执行的16进制数据
+    /// @notice 通过参数计算唯一操作 ID
     function getOpId(address target, uint256 value, bytes calldata data, uint256 eta)
         public
-        pure   
+        pure
         returns (bytes32)
     {
         return keccak256(abi.encode(target, value, data, eta));
     }
 
-    /*
-    * @notice 排队一个将来可执行的操作
-    * @param target 目标地址
-    * @param value 附带Wei
-    * @param data 调用数据
-    * @param eta 最早执行时间 >= block.timestamp +minDelay
-    * onlyAdmin 代表只有管理员才能调用这个函数，否则交易会回滚
-    *
-     */
-    function queue(address target, uint256 value, bytes calldata data, uint256 eta) 
-        external 
-        onlyAdmin 
+    /// @notice 排队一个未来操作，eta 需满足最小延迟
+    function queue(address target, uint256 value, bytes calldata data, uint256 eta)
+        external
+        onlyAdmin
         returns (bytes32 opId)
     {
-        // 验证target是否是地址
         require(target != address(0), "zero target");
-
-        // 验证eta是否大于最小延迟，不允许eat比出口
         require(eta >= block.timestamp + minDelay, "eta too soon");
 
-        // 获取唯一的操作ID，openId已经在函数签名声明bytes32 所以这里必须要再次声明
         opId = getOpId(target, value, data, eta);
-        
-        // 查看是否已经排队
         require(!queued[opId], "already queued");
 
-        // 未排队设置未已排队状态
         queued[opId] = true;
-
-        // 加入日志
         emit Queue(opId, target, value, data, eta);
     }
 
-    /// @notice 执行一个已经排队的操作
+    /// @notice 执行排队操作；为了可用性，任何地址都可触发执行
     function execute(address target, uint256 value, bytes calldata data, uint256 eta)
         external
         payable
-        onlyAdmin
         returns (bytes memory result)
     {
         bytes32 opId = getOpId(target, value, data, eta);
 
-        // 验证这个操作是否已经排队
         require(queued[opId], "not queued");
-        // 验证最小时间是否已经到达
         require(block.timestamp >= eta, "too early");
 
-        // 先标记状态
         queued[opId] = false;
         (bool ok, bytes memory ret) = target.call{value: value}(data);
-        
-        // 验证调用是否成功
         require(ok, "call failed");
-    
+
         emit Execute(opId, target, value, data);
         return ret;
     }
 
-    // 管理员取消排队操作
+    /// @notice 管理员可取消排队操作
     function cancel(bytes32 opId) external onlyAdmin {
         require(queued[opId], "not queued");
         queued[opId] = false;
-
         emit Cancel(opId);
     }
 }
 
 /**
-* @title LinearVestingVault
-* @notice 线性锁仓金库：从 start 开始到 start+duration 线性释放 totalAmount
-* @dev 管理操作（如改受益人）只能由 timelock 调用
-*/
+ * @title LinearVestingVault
+ * @notice 线性锁仓：start 到 start+duration 期间按线性比例释放 totalAmount
+ * @dev 管理操作（如改 beneficiary）仅能通过 timelock
+ */
 contract LinearVestingVault {
-
-    // 日志
     event Released(uint256 amount, uint256 totalReleased);
     event BeneficiaryChanged(address indexed oldB, address indexed newB);
 
-    // immutable 表示在合约部署时初始化，之后不能修改，仅有一次赋值的机会
-    IERC20 public immutable token;          // 被锁定的代币
+    IERC20 public immutable token; // 锁仓代币
+    address public beneficiary; // 收款受益人
+    address public immutable timelock; // 管理权限来源
 
-    address public beneficiary;       // 受益人（接收释放代币）
-    address public immutable timelock; // 时间锁地址（管理权限）
-
-    uint64 public immutable start;          // 开始时间戳
-    uint64 public immutable duration;       // 释放总市场（秒）
-    uint256 public immutable totalAmount;   // 锁仓总额
-    uint256 public released;                // 已释放总量
+    uint64 public immutable start; // 开始时间戳
+    uint64 public immutable duration; // 线性释放时长（秒）
+    uint256 public immutable totalAmount; // 总锁仓额度
+    uint256 public released; // 已释放额度
 
     modifier onlyTimelock() {
         require(msg.sender == timelock, "not timelock");
+        _;
     }
 
-    
+    constructor(
+        address _token,
+        address _beneficiary,
+        uint64 _start,
+        uint64 _duration,
+        uint256 _totalAmount,
+        address _timelock
+    ) {
+        require(_token != address(0), "zero token");
+        require(_beneficiary != address(0), "zero beneficiary");
+        require(_duration > 0, "duration=0");
+        require(_totalAmount > 0, "amount=0");
+        require(_timelock != address(0), "zero timelock");
+
+        token = IERC20(_token);
+        beneficiary = _beneficiary;
+        start = _start;
+        duration = _duration;
+        totalAmount = _totalAmount;
+        timelock = _timelock;
+    }
+
+    /// @notice 某时间点已归属总量（线性）
+    function vestedAmount(uint256 timestamp) public view returns (uint256) {
+        if (timestamp <= start) return 0;
+        if (timestamp >= start + duration) return totalAmount;
+
+        uint256 elapsed = timestamp - start;
+        return (totalAmount * elapsed) / duration;
+    }
+
+    /// @notice 当前可领取额度 = 已归属 - 已领取
+    function releasable() public view returns (uint256) {
+        uint256 vested = vestedAmount(block.timestamp);
+        if (vested <= released) return 0;
+        return vested - released;
+    }
+
+    /// @notice 任何人都可触发释放，资金只会转给 beneficiary
+    function release() external {
+        uint256 amount = releasable();
+        require(amount > 0, "nothing releasable");
+
+        released += amount;
+        require(token.transfer(beneficiary, amount), "token transfer failed");
+
+        emit Released(amount, released);
+    }
+
+    /// @notice 示例管理操作：更换受益人（必须由 timelock 调用）
+    function setBeneficiary(address newBeneficiary) external onlyTimelock {
+        require(newBeneficiary != address(0), "zero beneficiary");
+        address old = beneficiary;
+        beneficiary = newBeneficiary;
+        emit BeneficiaryChanged(old, newBeneficiary);
+    }
 }
